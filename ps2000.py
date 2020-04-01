@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
 
 """Controlling functions for EA-PS2000 power supply
+
+Adapted from https://github.com/marcj71/ps2000
+Modified using https://github.com/xolotl90/ps2000/blob/master/ps2000.py
+
 """
 
 import argparse
-import serial
+import functools
 import struct
 import sys
 import time
 
+import serial
+
 
 class ps2000(object):
-
     # set verbose to True to see all bytes
     verbose = False
 
@@ -24,11 +29,16 @@ class ps2000(object):
     i_nom = 0
 
     # open port upon initialization
-    def __init__(self, port="/dev/ttyACM0"):
+    def __init__(self, port="/dev/ttyACM0", triple=False):
+        """
+        :param port: The device port your power supply is connected to.
+        :param triple: Set to True if you have a Triple model. This is needed to address second channel.
+        """
         # set timeout to 0.06s to guarantee minimum interval time of 50ms
         self.ser_dev = serial.Serial(port, timeout=0.06, baudrate=115200, parity=serial.PARITY_ODD)
         self.u_nom = self.get_nominal_voltage()
         self.i_nom = self.get_nominal_current()
+        self.triple = triple
 
     # close the door behind you
     def close(self):
@@ -36,14 +46,19 @@ class ps2000(object):
 
     def __enter__(self):
         self.set_remote(True)
+        if self.triple:
+            self.set_remote(True, 1)
         return self
 
     def __exit__(self, type, value, traceback):
         self.set_remote(False)
+        if self.triple:
+            self.set_remote(False, 1)
         self.close()
 
     # construct telegram
-    def _construct(self, type, node, obj, data):
+    @staticmethod
+    def _construct(type, node, obj, data):
         telegram = bytearray()
         telegram.append(0x30 + type)  # SD (start delimiter)
         telegram.append(node)  # DN (device node)
@@ -61,19 +76,20 @@ class ps2000(object):
         return telegram
 
     # compare checksum with header and data in response from device
-    def _check_checksum(self, ans):
+    @staticmethod
+    def _check_checksum(ans):
         cs = 0
         for b in ans[0:-2]:
             cs += b
         if (ans[-2] != (cs >> 8)) or (ans[-1] != (cs & 0xFF)):
             print("ERROR: checksum mismatch")
             sys.exit(1)
-            return False
         else:
             return True
 
     # check for errors in response from device
-    def _check_error(self, ans):
+    @staticmethod
+    def _check_error(ans):
         if ans[2] != 0xFF:
             return False
 
@@ -104,11 +120,10 @@ class ps2000(object):
             print("%02x " % (b), end="")
         print()
         sys.exit(1)
-        return True
 
     # send one telegram, receive and check one response
     def _transfer(self, type, node, obj, data):
-        telegram = self._construct(type, 0, obj, data)
+        telegram = self._construct(type, node, obj, data)
         if self.verbose:
             print("* telegram: ", end="")
             for b in telegram:
@@ -139,38 +154,38 @@ class ps2000(object):
         return ans
 
     # get a binary object
-    def _get_binary(self, obj):
-        ans = self._transfer(self.PS_QUERY, 0, obj, "")
+    def _get_binary(self, obj, node):
+        ans = self._transfer(self.PS_QUERY, node, obj, "")
 
         return ans[3:-2]
 
     # set a binary object
-    def _set_binary(self, obj, mask, data):
-        ans = self._transfer(self.PS_SEND, 0, obj, [mask, data])
+    def _set_binary(self, obj, mask, data, node):
+        ans = self._transfer(self.PS_SEND, node, obj, [mask, data])
 
         return ans[3:-2]
 
     # get a string-type object
-    def _get_string(self, obj):
-        ans = self._transfer(self.PS_QUERY, 0, obj, "")
+    def _get_string(self, obj, node):
+        ans = self._transfer(self.PS_QUERY, node, obj, "")
 
         return ans[3:-3].decode("ascii")
 
     # get a float-type object
-    def _get_float(self, obj):
-        ans = self._transfer(self.PS_QUERY, 0, obj, "")
+    def _get_float(self, obj, node):
+        ans = self._transfer(self.PS_QUERY, node, obj, "")
 
         return struct.unpack(">f", ans[3:-2])[0]
 
     # get an integer object
-    def _get_integer(self, obj):
-        ans = self._transfer(self.PS_QUERY, 0, obj, "")
+    def _get_integer(self, obj, node):
+        ans = self._transfer(self.PS_QUERY, node, obj, "")
 
         return (ans[3] << 8) + ans[4]
 
     # set an integer object
-    def _set_integer(self, obj, data):
-        ans = self._transfer(self.PS_SEND, 0, obj, [data >> 8, data & 0xFF])
+    def _set_integer(self, obj, data, node):
+        ans = self._transfer(self.PS_SEND, node, obj, [data >> 8, data & 0xFF])
 
         return (ans[3] << 8) + ans[4]
 
@@ -180,75 +195,75 @@ class ps2000(object):
 
     # object 0
     def get_type(self):
-        return self._get_string(0)
+        return self._get_string(0, node=0)
 
     # object 1
     def get_serial(self):
-        return self._get_string(1)
+        return self._get_string(1, node=0)
 
     # object 2
-    def get_nominal_voltage(self):
-        return self._get_float(2)
+    def get_nominal_voltage(self, node=0):
+        return self._get_float(2, node)
 
     # object 3
-    def get_nominal_current(self):
-        return self._get_float(3)
+    def get_nominal_current(self, node=0):
+        return self._get_float(3, node)
 
     # object 4
-    def get_nominal_power(self):
-        return self._get_float(4)
+    def get_nominal_power(self, node=0):
+        return self._get_float(4, node)
 
     # object 6
-    def get_article(self):
-        return self._get_string(6)
+    def get_article(self, node=0):
+        return self._get_string(6, node)
 
     # object 8
-    def get_manufacturer(self):
-        return self._get_string(8)
+    def get_manufacturer(self, node=0):
+        return self._get_string(8, node)
 
     # object 9
-    def get_version(self):
-        return self._get_string(9)
+    def get_version(self, node=0):
+        return self._get_string(9, node)
 
     # object 19
-    def get_device_class(self):
-        return self._get_integer(19)
+    def get_device_class(self, node=0):
+        return self._get_integer(19, node)
 
     # object 38
-    def get_OVP_threshold(self):
-        v = self._get_integer(38)
+    def get_OVP_threshold(self, node=0):
+        v = self._get_integer(38, node=0)
         return self.u_nom * v / 25600
 
-    def set_OVP_threshold(self, u):
-        return self._set_integer(38, u)
+    def set_OVP_threshold(self, u, node=0):
+        return self._set_integer(38, u, node)
 
     # object 39
-    def get_OCP_threshold(self):
-        i = self._get_integer(39)
+    def get_OCP_threshold(self, node=0):
+        i = self._get_integer(39, node)
         return self.i_nom * i / 25600
 
-    def set_OCP_threshold(self, i):
-        return self._set_integer(39, i)
+    def set_OCP_threshold(self, i, node=0):
+        return self._set_integer(39, i, node)
 
     # object 50
-    def get_voltage_setpoint(self):
-        v = self._get_integer(50)
+    def get_voltage_setpoint(self, node=0):
+        v = self._get_integer(50, node)
         return self.u_nom * v / 25600
 
-    def set_voltage(self, u):
-        return self._set_integer(50, int(round((u * 25600.0) / self.u_nom)))
+    def set_voltage(self, u, node=0):
+        return self._set_integer(50, int(round((u * 25600.0) / self.u_nom)), node)
 
     # object 51
-    def get_current_setpoint(self):
-        i = self._get_integer(51)
+    def get_current_setpoint(self, node=0):
+        i = self._get_integer(51, node)
         return self.i_nom * i / 25600
 
-    def set_current(self, i):
-        return self._set_integer(51, int(round((i * 25600.0) / self.i_nom)))
+    def set_current(self, i, node=0):
+        return self._set_integer(51, int(round((i * 25600.0) / self.i_nom)), node)
 
     # object 54
-    def get_control(self):
-        ans = self._get_binary(54)
+    def get_control(self, node=0):
+        ans = self._get_binary(54, node)
 
         control = dict()
         control["output_on"] = True if ans[1] & 0x01 else False
@@ -256,39 +271,39 @@ class ps2000(object):
 
         return control
 
-    def _set_control(self, mask, data):
-        ans = self._set_binary(54, mask, data)
+    def _set_control(self, mask, data, node=0):
+        ans = self._set_binary(54, mask, data, node)
 
         # return True if command was acknowledged ("error 0")
         return ans[0] == 0xFF and ans[1] == 0x00
 
-    def get_remote(self):
-        return self.get_control()["remote"]
+    def get_remote(self, node=0):
+        return self.get_control(node)["remote"]
 
-    def set_remote(self, remote=True):
+    def set_remote(self, remote=True, node=0):
         if remote:
-            return self._set_control(0x10, 0x10)
+            return self._set_control(0x10, 0x10, node)
         else:
-            return self._set_control(0x10, 0x00)
+            return self._set_control(0x10, 0x00, node)
 
-    def set_local(self, local=True):
-        return self.set_remote(not local)
+    def set_local(self, local=True, node=0):
+        return self.set_remote(not local, node)
 
-    def get_output_on(self):
-        return self.get_control()["output_on"]
+    def get_output_on(self, node=0):
+        return self.get_control(node)["output_on"]
 
-    def set_output_on(self, on=True):
+    def set_output_on(self, on=True, node=0):
         if on:
-            return self._set_control(0x01, 0x01)
+            return self._set_control(0x01, 0x01, node)
         else:
-            return self._set_control(0x01, 0x00)
+            return self._set_control(0x01, 0x00, node)
 
-    def set_output_off(self, off=True):
-        return self.set_output_on(not off)
+    def set_output_off(self, off=True, node=0):
+        return self.set_output_on(not off, node)
 
     # object 71
-    def get_actual(self, print_state=False):
-        ans = self._get_binary(71)
+    def get_actual(self, print_state=False, node=0):
+        ans = self._get_binary(71, node)
 
         actual = dict()
         actual["remote"] = True if ans[0] & 0x03 else False
@@ -352,8 +367,8 @@ class ps2000(object):
         return actual
 
     # object 72
-    def get_setpoints(self):
-        ans = self._get_binary(72)
+    def get_setpoints(self, node=0):
+        ans = self._get_binary(72, node)
 
         actual = dict()
         actual["remote"] = True if ans[0] & 0x03 else False
@@ -369,15 +384,19 @@ class ps2000(object):
         return actual
 
 
-def check_available(port, target="PS 2042"):
+@functools.lru_cache(maxsize=1)
+def check_available(port, target=["PS 2042", "PS 2342"]):
     try:
         with ps2000(port) as ps:
-            return target in ps.get_type()
+            for t in target:
+                if t in ps.get_type():
+                    return True
+            return False
     except serial.serialutil.SerialException:
         return False
 
 
-def print_info(ps):
+def print_info(ps, node):
     print("type    " + ps.get_type())
     print("serial  " + ps.get_serial())
     print("article " + ps.get_article())
@@ -389,9 +408,9 @@ def print_info(ps):
     print("class        0x%04x" % ps.get_device_class())
     print("OVP          %f" % ps.get_OVP_threshold())
     print("OCP          %f" % ps.get_OCP_threshold())
-    print("control      0x%04x" % ps.set_remote())
-    print("output       0x%04x" % ps.set_output_on())
-    ps.get_actual(True)
+    print("control      0x%04x" % ps.set_remote(node=node))
+    print("output       0x%04x" % ps.set_output_on(node=node))
+    ps.get_actual(True, node)
     # print('set voltage      %f %f' % (ps.set_voltage(12.34), ps.get_voltage_setpoint()))
     # ps.get_actual(True)
 
@@ -400,6 +419,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Control PS2000 power supply")
     parser.add_argument("-p", "--port", type=str, help="serial port to use", required=True)
     parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument(
+        "-n", "--node", type=int, help="device output node [0,1] (default=0)", default=0
+    )
 
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--on", help="turn on", action="store_true")
@@ -408,31 +430,37 @@ if __name__ == "__main__":
     group.add_argument("--info", help="toggle", action="store_true")
     args = parser.parse_args()
 
-    with ps2000(args.port) as ps:
+    # set device_triple in case a node value different to 0 is used
+    if args.node != 0:
+        device_triple = True
+    else:
+        device_triple = False
+
+    with ps2000(args.port, device_triple) as ps:
 
         if args.verbose:
-            print("Vset: {}".format(ps.get_voltage_setpoint()))
-            print("Iset: {}".format(ps.get_current_setpoint()))
-            print("Vact: {}".format(ps.get_actual()["v"]))
-            print("Iact: {}".format(ps.get_actual()["i"]))
+            print("Vset: {}".format(ps.get_voltage_setpoint(args.node)))
+            print("Iset: {}".format(ps.get_current_setpoint(args.node)))
+            print("Vact: {}".format(ps.get_actual(node=args.node)["v"]))
+            print("Iact: {}".format(ps.get_actual(node=args.node)["i"]))
 
         if args.on:
             print("turning on")
-            ps.set_output_on(True)
+            ps.set_output_on(True, args.node)
         elif args.off:
             print("turning off")
-            ps.set_output_on(False)
+            ps.set_output_on(False, args.node)
         elif args.toggle:
-            output_on = ps.get_output_on()
+            output_on = ps.get_output_on(args.node)
             if output_on:
                 print("Output on -> turning off")
             else:
                 print("Output off -> turning on")
-            ps.set_output_on(not output_on)
+            ps.set_output_on(not output_on, args.node)
         elif args.info:
-            print_info(ps)
+            print_info(ps, args.node)
 
         if args.verbose:
             time.sleep(1)
-            print("Vact: {}".format(ps.get_actual()["v"]))
-            print("Iact: {}".format(ps.get_actual()["i"]))
+            print("Vact: {}".format(ps.get_actual(node=args.node)["v"]))
+            print("Iact: {}".format(ps.get_actual(node=args.node)["i"]))
